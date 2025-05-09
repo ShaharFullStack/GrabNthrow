@@ -1,12 +1,11 @@
 import * as THREE from 'three';
 
 const GRAVITY = new THREE.Vector3(0, -9.81, 0);
-const GROUND_Y = 0.25; // Y position of the ground (half of object height if it's a 0.5 cube)
-const GROUND_V = 0.25; // Y position of the ground (half of object height if it's a 0.5 cube)
+const GROUND_Y = 0.001; // Y position of the ground
 const DAMPING_FACTOR = 0.98; // For velocity decay
 const ANGULAR_DAMPING_FACTOR = 0.95;
-const COLLISION_ELASTICITY = 0.7; // How bouncy collisions between cubes are (0-1)
-const CUBE_SIZE = 0.65; // Size of cube (assuming all cubes have same size)
+const COLLISION_ELASTICITY = 0.7; // How bouncy collisions between balls are (0-1)
+const BALL_RADIUS = 0.25; // Half of the original CUBE_SIZE for equivalent volume
 
 export class PhysicsObject {
     constructor(mesh, initialPosition) {
@@ -15,14 +14,14 @@ export class PhysicsObject {
         this.mesh.position.copy(initialPosition);
 
         // Ensure the object starts above the ground
-        if (this.mesh.position.y < GROUND_Y) {
-            this.mesh.position.y = GROUND_Y + 0.02;
+        if (this.mesh.position.y < GROUND_Y + BALL_RADIUS) {
+            this.mesh.position.y = GROUND_Y + BALL_RADIUS + 0.02;
         }
 
         this.velocity = new THREE.Vector3();
         this.angularVelocity = new THREE.Vector3();
         this.isHeld = false;
-        this.size = CUBE_SIZE; // Size of the cube for collision detection
+        this.radius = BALL_RADIUS; // Radius of the ball for collision detection
         this.mass = 1; // Default mass, could be variable in future
         this.lastCollisionTime = 0; // To prevent multiple collision detections in same frame
     }
@@ -51,11 +50,11 @@ export class PhysicsObject {
             this.mesh.material.needsUpdate = true;
         }
         
-        // Add some random spin
+        // Add some random spin - slightly reduced for ball physics
         this.angularVelocity.set(
-            (Math.random() - 0.5) * 5,
-            (Math.random() - 0.5) * 5,
-            (Math.random() - 0.5) * 5
+            (Math.random() - 0.5) * 4,
+            (Math.random() - 0.5) * 4,
+            (Math.random() - 0.5) * 4
         );
     }
 
@@ -64,8 +63,8 @@ export class PhysicsObject {
         // Skip if either object is held
         if (this.isHeld || other.isHeld) return false;
 
-        // Simple collision check using bounding boxes
-        const minDistance = this.size + other.size;
+        // For balls, we use the sum of radii
+        const minDistance = this.radius + other.radius;
         const distance = this.mesh.position.distanceTo(other.mesh.position);
 
         // Skip very recent collisions (avoids multiple detections in one collision)
@@ -73,7 +72,7 @@ export class PhysicsObject {
         if (now - this.lastCollisionTime < 100) return false;
 
         // Check for collision
-        if (distance < minDistance * 0.9) { // Using 0.8 as a factor for better visual results
+        if (distance < minDistance) {
             this.lastCollisionTime = now;
             return true;
         }
@@ -112,23 +111,23 @@ export class PhysicsObject {
         other.velocity.sub(impulse);
 
         // Position correction to prevent objects from getting stuck inside each other
-        const penetrationDepth = (this.size + other.size) - this.mesh.position.distanceTo(other.mesh.position);
+        const penetrationDepth = (this.radius + other.radius) - this.mesh.position.distanceTo(other.mesh.position);
         if (penetrationDepth > 0) {
             const correction = collisionNormal.clone().multiplyScalar(penetrationDepth * 0.6);
             this.mesh.position.add(correction);
             other.mesh.position.sub(correction);
         }
 
-        // Add some random spin variation on collision
+        // Add some random spin variation on collision - reduced for spheres
         this.angularVelocity.add(new THREE.Vector3(
-            (Math.random() - 0.5) * 1,
-            (Math.random() - 0.5) * 1,
-            (Math.random() - 0.5) * 1
+            (Math.random() - 0.5) * 0.8,
+            (Math.random() - 0.5) * 0.8,
+            (Math.random() - 0.5) * 0.8
         ));
         other.angularVelocity.add(new THREE.Vector3(
-            (Math.random() - 0.5) * 1,
-            (Math.random() - 0.5) * 1,
-            (Math.random() - 0.5) * 1
+            (Math.random() - 0.5) * 0.8,
+            (Math.random() - 0.5) * 0.8,
+            (Math.random() - 0.5) * 0.8
         ));
     }
 
@@ -150,7 +149,7 @@ export class PhysicsObject {
             // Update position
             this.mesh.position.addScaledVector(this.velocity, deltaTime);
 
-            // Update rotation
+            // Update rotation - for a ball, rotation is more visual than functional
             this.mesh.rotation.x += this.angularVelocity.x * deltaTime;
             this.mesh.rotation.y += this.angularVelocity.y * deltaTime;
             this.mesh.rotation.z += this.angularVelocity.z * deltaTime;
@@ -159,28 +158,38 @@ export class PhysicsObject {
             this.velocity.multiplyScalar(DAMPING_FACTOR);
             this.angularVelocity.multiplyScalar(ANGULAR_DAMPING_FACTOR);
 
-            // Simple ground collision and bounce
-            if (this.mesh.position.y < GROUND_Y) {
-                this.mesh.position.y = GROUND_Y;
+            // Ground collision and bounce - using radius for ball
+            if (this.mesh.position.y < GROUND_Y + this.radius) {
+                this.mesh.position.y = GROUND_Y + this.radius;
                 this.velocity.y *= -0.5; // Bounce with energy loss
-                // Friction for horizontal movement on ground
-                this.velocity.x *= 0.8;
-                this.velocity.z *= 0.8;
-                this.angularVelocity.multiplyScalar(0.8); // Friction for spin
+                
+                // Rolling friction for horizontal movement on ground - less than for cubes
+                this.velocity.x *= 0.9;
+                this.velocity.z *= 0.9;
+                
+                // Calculate rolling motion for the ball
+                // For a rolling ball, angular velocity should relate to linear velocity
+                const rollAxis = new THREE.Vector3(-this.velocity.z, 0, this.velocity.x).normalize();
+                const rollSpeed = this.velocity.length() / this.radius;
+                
+                if (rollAxis.length() > 0.01) { // Only if there's significant horizontal movement
+                    this.angularVelocity = rollAxis.multiplyScalar(rollSpeed);
+                } else {
+                    this.angularVelocity.multiplyScalar(0.9); // Just slow down the spin
+                }
             }
 
             // Boundary checks to keep objects in playable area
-            // Boundary checks to keep objects in playable area
-            const BOUND_X = 10; // Changed from Ó10 to 10
+            const BOUND_X = 10;
             const BOUND_Z = 10;
 
-            if (Math.abs(this.mesh.position.x) > BOUND_X) {
-                this.mesh.position.x = Math.sign(this.mesh.position.x) * BOUND_X;
+            if (Math.abs(this.mesh.position.x) > BOUND_X - this.radius) {
+                this.mesh.position.x = Math.sign(this.mesh.position.x) * (BOUND_X - this.radius);
                 this.velocity.x *= -0.5; // Bounce off boundary
             }
 
-            if (Math.abs(this.mesh.position.z) > BOUND_Z) {
-                this.mesh.position.z = Math.sign(this.mesh.position.z) * BOUND_Z;
+            if (Math.abs(this.mesh.position.z) > BOUND_Z - this.radius) {
+                this.mesh.position.z = Math.sign(this.mesh.position.z) * (BOUND_Z - this.radius);
                 this.velocity.z *= -0.5; // Bounce off boundary
             }
         }
