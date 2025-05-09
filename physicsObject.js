@@ -4,7 +4,7 @@ const GRAVITY = new THREE.Vector3(0, -9.81, 0);
 const GROUND_Y = 0.001; // Y position of the ground
 const DAMPING_FACTOR = 0.98; // For velocity decay
 const ANGULAR_DAMPING_FACTOR = 0.95;
-const COLLISION_ELASTICITY = 0.7; // How bouncy collisions between balls are (0-1)
+const COLLISION_ELASTICITY = 0.9; // How bouncy collisions between balls are (0-1)
 const BALL_RADIUS = 0.25; // Half of the original CUBE_SIZE for equivalent volume
 
 export class PhysicsObject {

@@ -6,6 +6,7 @@ import { PhysicsObject } from 'physicsObject';
 const GRAB_THRESHOLD = 1.2; // Increased from 0.7 for easier grabbing
 const THROW_FORCE = 15;
 const GROUND_Y = 0.22; // Y position of the ground (half of object height if it's a 0.5 cube)
+const THROW_HISTORY_LENGTH = 5; // Number of frames to track for throw direction
 
 export class Game {
     constructor(renderDiv) {
@@ -16,6 +17,10 @@ export class Game {
         this.physicsObjects = [];
         this.heldObject = null;
         this.handIndicator = null;
+
+        // Store recent hand positions for throw direction calculation
+        this.handPositionHistory = [];
+        this.lastGrabPosition = null;
 
         this.clock = new THREE.Clock();
         this.onReady = () => { }; // Callback for when MediaPipe is ready
@@ -75,14 +80,18 @@ export class Game {
     }
 
     _createThrowableObjects() {
-        const boxGeometry = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+        const sphereGeometry = new THREE.SphereGeometry(0.25, 32, 32);
         const colors = [0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ffff];
 
         // Keep track of existing positions to avoid overlap
         const existingPositions = [];
 
         for (let i = 0; i < 6; i++) {
-            const material = new THREE.MeshStandardMaterial({ color: colors[i] });
+            const material = new THREE.MeshStandardMaterial({ 
+                color: colors[i],
+                roughness: 0.7,
+                metalness: 0.2
+            });
 
             // Generate a position that doesn't overlap with existing objects
             let position;
@@ -119,7 +128,7 @@ export class Game {
 
             existingPositions.push(position.clone());
 
-            const obj = new PhysicsObject(new THREE.Mesh(boxGeometry, material), position);
+            const obj = new PhysicsObject(new THREE.Mesh(sphereGeometry, material), position);
             this.physicsObjects.push(obj);
             this.sceneManager.scene.add(obj.mesh);
         }
@@ -135,26 +144,26 @@ export class Game {
 
         const handData = this.handTracker.getHandData();
 
-        // Hand indicator update
+                    // Hand indicator update
         if (handData && handData.landmarks) {
             this.handIndicator.visible = true;
 
             // Get depth estimation
             const depthEstimate = this.handTracker.estimateDepth();
 
-            // Use the inverted depth to affect the ring size
-            // Closer hand (smaller depthEstimate) = larger ring
-            // Further hand (larger depthEstimate) = smaller ring
-            const ringScale = 1.0 + (1.0 - depthEstimate) * 0.5; // Scale from 1.0 to 1.5 based on closeness
+            // Use the depth to affect the ring size - now non-inverted
+            // Closer hand (larger depthEstimate) = larger ring
+            // Further hand (smaller depthEstimate) = smaller ring
+            const ringScale = 1.0 + (depthEstimate) * 0.5; // Scale from 1.0 to 1.5 based on closeness
             this.depthRing.scale.set(ringScale, ringScale, 1);
             
             // Also adjust opacity based on depth - closer = more opaque
-            this.depthRing.material.opacity = 0.3 + (1.0 - depthEstimate) * 0.4; // 0.3 to 0.7 based on closeness
+            this.depthRing.material.opacity = 0.3 + (depthEstimate) * 0.4; // 0.3 to 0.7 based on closeness
             
-            // Color feedback for depth
+            // Color feedback for depth - now non-inverted
             // Blend between blue (far) and red (near)
-            const r = Math.floor(255 * (1.0 - depthEstimate));
-            const b = Math.floor(255 * depthEstimate);
+            const r = Math.floor(255 * (depthEstimate));
+            const b = Math.floor(255 * (1.0 - depthEstimate));
             const g = 50; // Low green component for better visibility
             
             const depthColor = new THREE.Color(r/255, g/255, b/255);
@@ -186,6 +195,12 @@ export class Game {
 
             // Adjust opacity based on height
             this.groundShadow.material.opacity = Math.max(0.1, Math.min(0.4, 0.4 - (heightFromGround * 0.03)));
+            
+            // Store hand position for throw direction calculation
+            this.handPositionHistory.push(this.handIndicator.position.clone());
+            if (this.handPositionHistory.length > THROW_HISTORY_LENGTH) {
+                this.handPositionHistory.shift();
+            }
         } else {
             this.handIndicator.visible = false;
             this.groundShadow.visible = false;
@@ -245,6 +260,12 @@ export class Game {
             }
             
             if (!this.heldObject) {
+                // Store position where grab started for throw direction calculation
+                this.lastGrabPosition = this.handIndicator.position.clone();
+                
+                // Reset hand position history on new grab
+                this.handPositionHistory = [];
+                
                 // Create a raycaster for better 3D grabbing
                 const raycaster = new THREE.Raycaster();
                 const screenPos = new THREE.Vector2(
@@ -300,6 +321,18 @@ export class Game {
                     // Provide visual feedback for the grabbed object
                     this.heldObject.mesh.material.emissive = new THREE.Color(0x333333);
                 }
+            } else {
+                // Continue to record hand position history while holding
+                if (this.handPositionHistory.length > 0) {
+                    const lastPos = this.handPositionHistory[this.handPositionHistory.length - 1];
+                    // Only add new position if it's significantly different from the last one
+                    if (lastPos.distanceTo(this.handIndicator.position) > 0.01) {
+                        this.handPositionHistory.push(this.handIndicator.position.clone());
+                        if (this.handPositionHistory.length > THROW_HISTORY_LENGTH) {
+                            this.handPositionHistory.shift();
+                        }
+                    }
+                }
             }
         } else { // Not grabbing or hand not detected
             // Update indicator color
@@ -315,22 +348,47 @@ export class Game {
                 // Reset emissive color of the previously held object
                 this.heldObject.mesh.material.emissive = new THREE.Color(0x000000);
                 
-                // Release object
-                const throwDirection = new THREE.Vector3();
-                this.sceneManager.camera.getWorldDirection(throwDirection);
-                // Adjust throw direction slightly upwards and relative to hand movement if possible
-                const handMovement = this.handTracker.getHandMovement(); // (dx, dy) screen space
+                // IMPROVED THROW DIRECTION CALCULATION
+                let throwDirection = new THREE.Vector3(0, 0.3, -1).normalize(); // Default direction
+                let throwForce = THROW_FORCE;
                 
-                // Project hand movement to world space (simplified)
-                const worldMovement = new THREE.Vector3(handMovement.x, -handMovement.y, 0)
-                    .applyQuaternion(this.sceneManager.camera.quaternion)
-                    .normalize();
-
-                throwDirection.add(worldMovement.multiplyScalar(0.3)).normalize();
-                throwDirection.y = Math.max(0.2, throwDirection.y + 0.2); // Ensure some upward component
+                // Calculate throw direction from hand movement history
+                if (this.handPositionHistory.length >= 2) {
+                    // Use the motion vector between the first and last positions in history
+                    const startPos = this.handPositionHistory[0];
+                    const endPos = this.handPositionHistory[this.handPositionHistory.length - 1];
+                    
+                    // Calculate the movement vector
+                    const throwVector = new THREE.Vector3().subVectors(endPos, startPos);
+                    
+                    // Only use this vector if it has significant magnitude
+                    if (throwVector.length() > 0.05) {
+                        // Forward/backward now properly aligned - no need to invert Z
+                        throwVector.z *= 2.5; // Increase depth influence
+                        throwVector.x *= 2.5; // Increase horizontal influence
+                        throwVector.y = Math.max(0.2, throwVector.y); // Ensure some upward motion
+                        
+                        throwDirection = throwVector.normalize();
+                        
+                        // Adjust throw force based on hand speed
+                        const handSpeed = throwVector.length() / (this.handPositionHistory.length * deltaTime);
+                        throwForce = Math.min(THROW_FORCE * 1.5, Math.max(THROW_FORCE * 0.7, handSpeed * 5));
+                    }
+                }
                 
-                this.heldObject.release(throwDirection, THROW_FORCE);
+                // Fallback to camera-based direction if hand history insufficient
+                if (throwDirection.length() < 0.1) {
+                    this.sceneManager.camera.getWorldDirection(throwDirection);
+                    throwDirection.y = Math.max(0.2, throwDirection.y + 0.2); // Ensure some upward component
+                }
+                
+                // Apply throw
+                this.heldObject.release(throwDirection, throwForce);
                 this.heldObject = null;
+                
+                // Reset hand position history after throw
+                this.handPositionHistory = [];
+                this.lastGrabPosition = null;
             }
         }
 

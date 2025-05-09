@@ -136,9 +136,9 @@ export class HandTracker {
     const MAX_SIZE = 0.3;
     const normalizedDepth = (avgSize - MIN_SIZE) / (MAX_SIZE - MIN_SIZE);
     
-    // INVERTED: Return 1 - normalizedDepth so larger hand = closer (0)
-    // and smaller hand = farther (1)
-    return 1.0 - Math.max(0, Math.min(1, normalizedDepth));
+    // Return normalizedDepth so smaller hand = farther (0)
+    // and larger hand = closer (1)
+    return Math.max(0, Math.min(1, normalizedDepth));
 }
 
     getHandData() {
@@ -147,4 +147,4 @@ export class HandTracker {
     getHandMovement() {
         return this.handMovement;
     }
-}   
+}
